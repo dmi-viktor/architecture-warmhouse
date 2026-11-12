@@ -1,0 +1,30 @@
+@startuml
+
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Диаграмма контекста — Smart Home (C4, уровень 1)
+
+Person(client, "Клиент", "Браузер / приложение: управляет датчиками, смотрит температуру")
+
+System(sensor_registry, "Sensor Registry", "Реестр датчиков: CRUD учётных записей, приём показаний, обогащение данными о температуре")
+
+System(temperature_service, "TemperatureService", "Внутренний сервис: получение актуальной температуры по локации и по датчику")
+
+SystemDb(postgres, "PostgreSQL", "Хранилище датчиков и сохранённых значений")
+
+System_Ext(sensors, "Датчики (оборудование)", "Физические устройства: сами отправляют показания в реестр")
+
+System_Ext(weather_api, "Внешний погодный API", "Источник данных о температуре")
+
+Rel(client, sensor_registry, "Управляет датчиками, запрашивает температуру", "HTTP /api/v1")
+
+Rel(sensors, sensor_registry, "Отправляют показания", "HTTP PATCH /api/v1/sensors/:id/value")
+
+Rel(sensor_registry, postgres, "Хранит датчики и значения", "TCP, SQL")
+
+Rel(sensor_registry, temperature_service, "Запрашивает текущую температуру", "HTTP (TEMPERATURE_API_URL)")
+
+Rel(temperature_service, weather_api, "Получает актуальную температуру", "HTTP")
+@enduml

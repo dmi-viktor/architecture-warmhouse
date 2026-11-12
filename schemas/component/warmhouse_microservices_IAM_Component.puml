@@ -1,0 +1,25 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Компонентная диаграмма - сервис IAM (C4)
+
+' Вызывающая сторона — другой контейнер системы
+Container(self_service, "Клиентский интерфейс умного дома", "ASP NET", "Агент пользователя")
+
+System_Boundary(iam_boundary, "IAM") {
+    Component(auth_api, "Auth API", "Go", "Регистрация, вход, выдача и обновление JWT")
+    Component(user_registry, "Реестр пользователей и домов", "Go", "Аккаунты, привязка устройств к домам, права доступа")
+}
+
+ContainerDb(iam_db, "IAM DB", "PostgreSQL", "Пользователи, дома, токены")
+
+' Вход: интерфейс проходит аутентификацию и получает токен
+Rel(self_service, auth_api, "Регистрация, вход, получение и обновление JWT", "HTTP")
+
+' Внутренние связи
+Rel(auth_api, user_registry, "Создаёт и обновляет учётные записи", "Внутренний вызов")
+Rel(auth_api, iam_db, "Читает и пишет учётные данные, сессии", "TCP, SQL")
+Rel(user_registry, iam_db, "Хранит пользователей, дома, права", "TCP, SQL")
+@enduml

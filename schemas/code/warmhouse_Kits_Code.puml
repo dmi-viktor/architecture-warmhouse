@@ -1,0 +1,68 @@
+@startuml
+title Диаграмма кода - Компонент «Каталог комплектов» (C4, уровень 4)
+
+skinparam class {
+    BackgroundColor #FDFDFD
+    BorderColor #444444
+    ArrowColor #444444
+}
+skinparam stereotypeCBackgroundColor #438DD5
+
+package "kits" {
+
+    class KitsAPI <<API>> {
+        +ListKits(ctx context.Context) ([]Kit, error)
+        +GetKit(ctx context.Context, kitID string) (Kit, error)
+        +GetKitDevices(ctx context.Context, kitID string) ([]KitDevice, error)
+        +GetSetupInstructions(ctx context.Context, kitID string) (SetupInstructions, error)
+        +AddKitDevices(ctx context.Context, kitID string) error
+    }
+
+    class KitCatalogService <<Сервис>> {
+        -repo KitRepository
+        -registrar DeviceRegistrar
+        +ListKits(ctx context.Context) ([]Kit, error)
+        +GetKit(ctx context.Context, kitID string) (Kit, error)
+        +GetKitDevices(ctx context.Context, kitID string) ([]KitDevice, error)
+        +GetSetupInstructions(ctx context.Context, kitID string) (SetupInstructions, error)
+        +AddKitDevices(ctx context.Context, kitID string) error
+    }
+
+    interface DeviceRegistrar <<Порт регистрации>> {
+        +RegisterKitDevices(ctx context.Context, kitID string, instructions SetupInstructions) error
+    }
+
+    class DeviceControlClient <<HTTP-клиент>> {
+        -baseUrl string
+    }
+
+    interface KitRepository <<Порт данных>> {
+        +ListKits(ctx context.Context) ([]Kit, error)
+        +GetKitByID(ctx context.Context, kitID string) (Kit, error)
+        +ListKitDevices(ctx context.Context, kitID string) ([]KitDevice, error)
+        +GetSetupInstructions(ctx context.Context, kitID string) (SetupInstructions, error)
+    }
+
+    class PostgresKitRepository <<Реализация>> {
+        -db *sql.DB
+    }
+
+    class PostgreSQL <<БД>>
+}
+
+class DeviceAPI <<Компонент управления>>
+
+' API маршрутизирует всё в сервис, включая прокси-метод
+KitsAPI ..> KitCatalogService : использует
+
+' Прокси-метод внутри сервиса: инструкции из репозитория, регистрация через порт
+KitCatalogService ..> KitRepository : зависит от интерфейса
+KitCatalogService ..> DeviceRegistrar : зависит от интерфейса
+
+PostgresKitRepository .up.|> KitRepository : реализует
+DeviceControlClient .up.|> DeviceRegistrar : реализует
+DeviceControlClient ..> DeviceAPI : RegisterKitDevices, HTTP
+
+KitCatalogService ..> PostgresKitRepository : конструируется с реализацией
+PostgresKitRepository --> PostgreSQL : SQL-запросы
+@enduml

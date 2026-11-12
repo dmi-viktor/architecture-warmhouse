@@ -1,0 +1,46 @@
+
+@startuml
+title ER-диаграмма - IAM DB (Пользователи и доступ)
+
+hide circle
+
+entity users {
+  *id : uuid <<PK>>
+  --
+  *email : varchar(255) <<unique>>
+  phone : varchar(20)
+  *password_hash : varchar(128)
+  *status : varchar(20)
+  *created_at : timestamptz
+}
+
+entity sessions {
+  *id : uuid <<PK>>
+  --
+  *user_id : uuid <<FK>>
+  *refresh_token_hash : varchar(128)
+  *expires_at : timestamptz
+  *created_at : timestamptz
+  revoked_at : timestamptz
+}
+
+entity homes {
+  *id : uuid <<PK>>
+  --
+  *name : varchar(200)
+  *created_at : timestamptz
+}
+
+entity home_members {
+  *home_id : uuid <<PK, FK>>
+  *user_id : uuid <<PK, FK>>
+  --
+  *role : varchar(20)
+  invited_by : uuid
+  *created_at : timestamptz
+}
+
+users ||..o{ sessions : "имеет сессии"
+users ||--o{ home_members : "участвует в домах"
+homes ||--o{ home_members : "содержит участников"
+@enduml

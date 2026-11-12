@@ -1,0 +1,38 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Контейнерная диаграмма - Экосистема умного дома (C4, уровень 2)
+
+Person(user, "Пользователь", "Владелец дома: выбирает устройства, настраивает сценарии, смотрит телеметрию")
+
+System_Boundary(ecosystem, "Экосистема умного дома") {
+    Container(self_service, "Клиентский интерфейс умного дома", "ASP NET", "Выбор устройств, подключение, настройка сценариев, просмотр телеметрии")
+    Container(iam, "IAM", "Go", "Пользователи, дома, авторизация, выдача и проверка токенов")
+    Container(kits, "Комплекты устройств", "Go", "Каталог готовых комплектов: состав и инструкции")
+    Container(device_control, "Управление устройствами", "Go", "Отопление, свет, ворота, наблюдение; исполнение сценариев. Частично реализован")
+    Container(partner_gateway, "Подключение устройств партнёров", "Go", "Адаптация стандартных протоколов к внутреннему формату экосистемы")
+}
+
+SystemDb(iam_db, "IAM DB", "Пользователи, дома, токены")
+SystemDb(kits_db, "Kits DB", "Каталог комплектов, параметры работы")
+SystemDb(control_db, "Control DB", "Устройства, показания, конфигурации сценариев")
+
+System_Ext(devices, "Устройства партнёров", "Оборудование: отопление, свет, ворота, камеры")
+System_Ext(weather_api, "Внешний погодный API", "Источник данных о температуре")
+
+Rel(user, self_service, "Пользуется экосистемой", "HTTPS /api/v1")
+Rel(self_service, iam, "Аутентификация и проверка прав", "HTTP")
+Rel(self_service, kits, "Выбор комплектов для подключения", "HTTP")
+Rel(self_service, device_control, "Команды управления, подключение устройств, запросы состояния и телеметрии", "HTTP")
+
+Rel(iam, iam_db, "Хранит данные пользователей", "TCP, SQL")
+Rel(kits, kits_db, "Хранит каталог", "TCP, SQL")
+Rel(device_control, control_db, "Хранит устройства, показания, сценарии", "TCP, SQL")
+
+Rel(kits, device_control, "Передаёт инструкции для запуска", "HTTP")
+Rel(partner_gateway, device_control, "События устройств (показания, состояния)", "HTTP")
+Rel(device_control, partner_gateway, "Команды устройствам", "HTTP")
+Rel(device_control, weather_api, "Получает актуальную температуру", "HTTP")
+Rel(partner_gateway, devices, "Подключение по стандартным протоколам", "MQTT и др.")
+
+@enduml

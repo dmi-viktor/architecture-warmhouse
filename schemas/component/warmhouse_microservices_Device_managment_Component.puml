@@ -1,0 +1,41 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Компонентная диаграмма — Управление устройствами (C4)
+
+Container(partner_gateway, "Подключение устройств партнёров", "Go", "События устройств, команды")
+Container(kits, "Комплекты устройств", "Go", "Инструкции и состав комплектов")
+Container(self_service, "Клиентский интерфейс умного дома", "ASP NET", "UIX: команды, состояния, телеметрия, сценарии")
+
+System_Boundary(device_control_boundary, "Управление устройствами") {
+    Component(device_api, "Device API", "Go", "Общий вход сервиса: проверка JWT, маршрутизация запросов и событий")
+    Component(state_store, "Состояния и телеметрия", "Go", "Актуальные состояния, история показаний, текущая температура. Только приём данных и ответы на запросы")
+    Component(scenario_engine, "Исполнитель сценариев", "Go", "Исполнение конфигураций и прямых команд: расписание, проверка условий, отправка команд в шлюз")
+    Component(device_registry, "Управление составом устройств", "Go", "Добавление и удаление устройств, активация в шлюзе")
+}
+
+ContainerDb(control_db, "Control DB", "PostgreSQL", "Устройства, показания, конфигурации сценариев")
+System_Ext(weather_api, "Внешний погодный API", "Источник данных о температуре")
+
+Rel(self_service, device_api, "Команды, состояния, телеметрия, сценарии", "HTTP")
+
+Rel(device_api, state_store, "Маршрутизирует запросы и события телеметрии", "Внутренний вызов")
+Rel(device_api, scenario_engine, "Маршрутизирует команды пользователя и конфигурации сценариев", "Внутренний вызов")
+Rel(device_api, device_registry, "Маршрутизирует добавление и удаление устройств", "Внутренний вызов")
+
+Rel(partner_gateway, device_api, "События устройств: показания, состояния", "HTTP")
+
+Rel(scenario_engine, partner_gateway, "Команды устройствам", "HTTP")
+Rel(scenario_engine, state_store, "Читает актуальные состояния для проверки условий сценариев", "Внутренний вызов")
+
+Rel(kits, device_api, "Инструкции по добавлению устройств комплекта", "HTTP")
+
+Rel(device_registry, partner_gateway, "Активация устройства при добавлении, отключение при удалении", "HTTP")
+
+Rel(state_store, weather_api, "Получает актуальную температуру", "HTTP")
+
+
+Rel(state_store, control_db, "Читает и пишет состояния, показания", "TCP, SQL")
+Rel(scenario_engine, control_db, "Читает конфигурации сценариев, фиксирует статусы команд", "TCP, SQL")
+Rel(device_registry, control_db, "Добавляет и удаляет устройства", "TCP, SQL")
+@enduml

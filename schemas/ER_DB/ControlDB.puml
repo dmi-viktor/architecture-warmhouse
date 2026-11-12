@@ -1,0 +1,57 @@
+@startuml
+title ER-диаграмма - Control DB (Управление устройствами)
+
+hide circle
+
+entity devices {
+  *id : uuid <<PK>>
+  --
+  *home_id : uuid
+  *name : varchar(200)
+  *device_type : varchar(50)
+  *protocol : varchar(20)
+  *partner_id : varchar(100)
+  *registered_at : timestamptz
+}
+
+entity device_states {
+  *device_id : uuid <<PK, FK>>
+  --
+  *state : jsonb
+  *updated_at : timestamptz
+}
+
+entity readings {
+  *id : bigserial <<PK>>
+  --
+  *device_id : uuid <<FK>>
+  *value : jsonb
+  *recorded_at : timestamptz
+}
+
+entity scenario_configs {
+  *id : uuid <<PK>>
+  --
+  *home_id : uuid
+  *name : varchar(200)
+  *trigger_type : varchar(20)
+  *trigger_config : jsonb
+  *actions : jsonb
+  *created_at : timestamptz
+}
+
+entity commands {
+  *id : uuid <<PK>>
+  --
+  *device_id : uuid <<FK>>
+  *payload : jsonb
+  *source : varchar(20)
+  *status : varchar(20)
+  *created_at : timestamptz
+}
+
+devices ||--o| device_states : "имеет актуальное состояние"
+devices ||..o{ readings : "отправляет показания"
+devices ||..o{ commands : "получает команды"
+devices ||..o{ scenario_configs : "управляется сценариями"
+@enduml
