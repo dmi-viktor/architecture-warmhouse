@@ -1,0 +1,31 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title Компонентная диаграмма - Клиентский интерфейс умного дома (C4)
+
+Person(user, "Пользователь", "Владелец дома")
+
+Container(iam, "IAM", "Go", "Пользователи, дома, авторизация")
+Container(device_control, "Управление устройствами", "Go", "Команды, состояния, телеметрия, сценарии")
+Container(partner_gateway, "Подключение устройств партнёров", "Go", "Техническое подключение устройств")
+Container(kits, "Комплекты устройств", "Go", "Каталог комплектов и инструкций")
+
+System_Boundary(self_service_boundary, "Клиентский интерфейс умного дома") {
+    Component(api_gateway_ui, "Публичный API", "ASP NET", "Единая точка входа: аутентификация запроса, маршрутизация к функциям")
+    Component(onboarding_wizard, "Мастер подключения устройств", "ASP NET", "Выбор комплекта, привязка устройства к дому")
+    Component(scenario_config, "Конструктор сценариев", "ASP NET", "Создание и редактирование пользовательских сценариев")
+    Component(data_viewer, "Просмотр данных дома", "ASP NET", "Дашборд состояний и телеметрия: сводка по дому, история показаний")
+}
+
+Rel(user, api_gateway_ui, "Пользуется экосистемой", "HTTPS /api/v1")
+
+Rel(api_gateway_ui, onboarding_wizard, "Маршрутизирует запросы подключения", "Внутренний вызов")
+Rel(api_gateway_ui, scenario_config, "Маршрутизирует запросы сценариев", "Внутренний вызов")
+Rel(api_gateway_ui, data_viewer, "Маршрутизирует запросы данных дома", "Внутренний вызов")
+
+Rel(api_gateway_ui, iam, "Аутентификация входа", "HTTP")
+Rel(onboarding_wizard, kits, "Запрашивает состав комплекта и инструкции", "HTTP")
+Rel(onboarding_wizard, partner_gateway, "Инициирует подключение устройства", "HTTP")
+Rel(scenario_config, device_control, "Сохраняет конфигурации сценариев", "HTTP")
+Rel(data_viewer, device_control, "Запрашивает состояния и историю показаний", "HTTP")
+@enduml

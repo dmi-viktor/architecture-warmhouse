@@ -192,3 +192,50 @@ build/
 
 tmp/
 task-*
+
+# Docker артефакты и тома (не храним состояние БД и логи в git)
+**/docker-volumes/
+**/data/
+**/pgdata/
+**/postgres-data/
+*.sql.bak
+
+# Образы и слои не нужны — они собираются из Dockerfile
+*.tar
+*.gz
+
+# Локальные конфиги с паролями и секретами
+.env
+.env.local
+*.env.*
+docker-compose.override.yml
+docker-compose.dev.yml
+
+# Go
+/bin/
+/pkg/
+go.sum          # можно коммитить, но если хочешь игнорировать — ок
+
+# .NET / MSBuild
+**/bin/
+**/obj/
+**/packages/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# IDE и ОС
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# Логи и временные файлы
+logs/
+**/logs/
+*.log
+tmp/
+temp/
