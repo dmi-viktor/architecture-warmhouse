@@ -1,0 +1,706 @@
+swagger: "2.0"
+info:
+  title: Device Control API
+  description: >-
+    API сервиса управления устройствами (№3): реестр устройств, актуальные
+    состояния, история показаний, команды и конфигурации сценариев.
+
+    Два канала доступа:
+      1. Пользовательские операции (интерфейс №2) — JWT из IAM API,
+         проверка роли в доме.
+      2. Сервисные операции (шлюз №4) — сервисный токен: приём событий
+         телеметрии и обновление статусов команд.
+
+    Сервис не знает ничего о комплектах устройств: их подключение
+    выполняет Kits API (№5), вызывая registerDevice для каждого
+    устройства из инструкции комплекта.
+  version: 1.1.0
+
+host: api.example.com
+basePath: /api/v1
+schemes:
+  - https
+
+consumes:
+  - application/json
+produces:
+  - application/json
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: devices
+    description: Реестр устройств, состояния и показания
+  - name: commands
+    description: Команды устройствам
+  - name: scenarios
+    description: Конфигурации сценариев
+  - name: events
+    description: >-
+      Входящий поток от шлюза подключения устройств (№4). Аутентификация
+      сервисным токеном, не JWT пользователя.
+
+paths:
+  # ------------------------------------------------------------------
+  # Устройства — пользовательские операции
+  # ------------------------------------------------------------------
+  /homes/{home_id}/devices:
+    get:
+      tags: [devices]
+      summary: Список устройств дома
+      operationId: listDevices
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - name: device_type
+          in: query
+          type: string
+          enum: [thermostat, motion_sensor, relay, socket]
+        - name: limit
+          in: query
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+        - name: offset
+          in: query
+          type: integer
+          minimum: 0
+          default: 0
+      responses:
+        200:
+          description: Список устройств
+          schema:
+            type: object
+            required: [items, total]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/Device'
+              total:
+                type: integer
+        401: { $ref: '#/responses/Unauthorized' }
+        403: { $ref: '#/responses/Forbidden' }
+
+    post:
+      tags: [devices]
+      summary: Зарегистрировать устройство
+      operationId: registerDevice
+      description: >-
+        Регистрирует одно устройство в доме. Вызывается как напрямую из
+        интерфейса №2, так и из Kits API (№5) при подключении комплекта —
+        для каждого устройства из devices_to_register отдельным вызовом.
+        Про комплекты сервис ничего не знает.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/DeviceRegistrationInput'
+      responses:
+        201:
+          description: Устройство зарегистрировано
+          schema:
+            $ref: '#/definitions/Device'
+        400: { $ref: '#/responses/BadRequest' }
+        401: { $ref: '#/responses/Unauthorized' }
+        403: { $ref: '#/responses/Forbidden' }
+        409:
+          description: Устройство с таким partner_id уже зарегистрировано
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /devices/{device_id}:
+    get:
+      tags: [devices]
+      summary: Карточка устройства
+      operationId: getDevice
+      parameters:
+        - $ref: '#/parameters/DeviceId'
+      responses:
+        200:
+          description: Устройство
+          schema:
+            $ref: '#/definitions/Device'
+        404: { $ref: '#/responses/NotFound' }
+
+    delete:
+      tags: [devices]
+      summary: Отключить устройство
+      operationId: deleteDevice
+      description: >-
+        Сервис удаляет запись устройства и связанные с ним сценарии.
+        Требуется роль owner или admin в доме устройства.
+      parameters:
+        - $ref: '#/parameters/DeviceId'
+      responses:
+        204:
+          description: Устройство отключено
+        403: { $ref: '#/responses/Forbidden' }
+        404: { $ref: '#/responses/NotFound' }
+
+  /devices/{device_id}/state:
+    get:
+      tags: [devices]
+      summary: Актуальное состояние устройства
+      operationId: getDeviceState
+      description: >-
+        Возвращает последнее значение из device_states. Если телеметрии ещё
+        не было, возвращает 404, а не пустой объект — интерфейс по этому
+        коду показывает «данные ещё не получены».
+      parameters:
+        - $ref: '#/parameters/DeviceId'
+      responses:
+        200:
+          description: Состояние
+          schema:
+            $ref: '#/definitions/DeviceState'
+        404: { $ref: '#/responses/NotFound' }
+
+  /devices/{device_id}/readings:
+    get:
+      tags: [devices]
+      summary: История показаний
+      operationId: listReadings
+      parameters:
+        - $ref: '#/parameters/DeviceId'
+        - name: from
+          in: query
+          required: true
+          type: string
+          format: date-time
+        - name: to
+          in: query
+          type: string
+          format: date-time
+        - name: limit
+          in: query
+          type: integer
+          maximum: 1000
+          default: 500
+      responses:
+        200:
+          description: Хронология показаний, отсортирована по recorded_at по возрастанию
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/Reading'
+        400: { $ref: '#/responses/BadRequest' }
+
+  # ------------------------------------------------------------------
+  # Команды
+  # ------------------------------------------------------------------
+  /devices/{device_id}/commands:
+    post:
+      tags: [commands]
+      summary: Отправить команду устройству
+      operationId: sendCommand
+      description: >-
+        Создаёт запись команды со статусом queued и ставит её в обработку.
+        Ответ возвращается сразу с идентификатором — фактический результат
+        исполнения отслеживается через GET /commands/{command_id} или
+        WebSocket-канал телеметрии. Шлюз №4 забирает команду и по мере
+        доставки отчитывается через POST /commands/{command_id}/status.
+      parameters:
+        - $ref: '#/parameters/DeviceId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/CommandInput'
+      responses:
+        202:
+          description: Команда принята
+          schema:
+            $ref: '#/definitions/Command'
+        404: { $ref: '#/responses/NotFound' }
+        409:
+          description: Устройство офлайн, команда не принята
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /commands/{command_id}:
+    get:
+      tags: [commands]
+      summary: Статус команды
+      operationId: getCommand
+      parameters:
+        - $ref: '#/parameters/CommandId'
+      responses:
+        200:
+          description: Команда
+          schema:
+            $ref: '#/definitions/Command'
+        404: { $ref: '#/responses/NotFound' }
+
+  # ------------------------------------------------------------------
+  # Сценарии
+  # ------------------------------------------------------------------
+  /homes/{home_id}/scenarios:
+    get:
+      tags: [scenarios]
+      summary: Список сценариев дома
+      operationId: listScenarios
+      parameters:
+        - $ref: '#/parameters/HomeId'
+      responses:
+        200:
+          description: Список сценариев
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/Scenario'
+
+    post:
+      tags: [scenarios]
+      summary: Создать сценарий
+      operationId: createScenario
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/ScenarioInput'
+      responses:
+        201:
+          description: Сценарий создан
+          schema:
+            $ref: '#/definitions/Scenario'
+        400: { $ref: '#/responses/BadRequest' }
+
+  /scenarios/{scenario_id}:
+    get:
+      tags: [scenarios]
+      summary: Сценарий по идентификатору
+      operationId: getScenario
+      parameters:
+        - $ref: '#/parameters/ScenarioId'
+      responses:
+        200:
+          description: Сценарий
+          schema:
+            $ref: '#/definitions/Scenario'
+        404: { $ref: '#/responses/NotFound' }
+
+    put:
+      tags: [scenarios]
+      summary: Обновить сценарий (полностью)
+      operationId: updateScenario
+      parameters:
+        - $ref: '#/parameters/ScenarioId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/ScenarioInput'
+      responses:
+        200:
+          description: Сценарий обновлён
+          schema:
+            $ref: '#/definitions/Scenario'
+
+    delete:
+      tags: [scenarios]
+      summary: Удалить сценарий
+      operationId: deleteScenario
+      parameters:
+        - $ref: '#/parameters/ScenarioId'
+      responses:
+        204:
+          description: Сценарий удалён
+
+  # ------------------------------------------------------------------
+  # Входящий поток от шлюза (№4) — сервисная аутентификация
+  # ------------------------------------------------------------------
+  /events:
+    post:
+      tags: [events]
+      summary: Приём событий от шлюза подключения устройств
+      operationId: receiveGatewayEvents
+      security:
+        - serviceAuth: []
+      description: >-
+        Шлюз (№4) после нормализации протоколов партнёров отправляет
+        сюда телеметрию и изменения состояний. Принимает пачку событий:
+        шлюз буферизует данные от устройств и отправляет батчами.
+        События обрабатываются асинхронно: 202 возвращается сразу
+        после постановки в очередь обработки.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required: [events]
+            properties:
+              events:
+                type: array
+                maxItems: 500
+                items:
+                  $ref: '#/definitions/GatewayEvent'
+      responses:
+        202:
+          description: События приняты
+          schema:
+            type: object
+            properties:
+              accepted:
+                type: integer
+              duplicates:
+                type: integer
+                description: >-
+                  События, отброшенные при дедупликации по event_id
+                  (повторная доставка после сетевого таймаута)
+        401: { $ref: '#/responses/Unauthorized' }
+
+  /commands/{command_id}/status:
+    post:
+      tags: [events]
+      summary: Обновить статус команды (от шлюза)
+      operationId: updateCommandStatus
+      security:
+        - serviceAuth: []
+      description: >-
+        Шлюз сообщает результат доставки команды устройству. Именно эти
+        вызовы двигают статус по цепочке queued → sent → acked/failed
+        в таблице commands.
+      parameters:
+        - $ref: '#/parameters/CommandId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required: [status]
+            properties:
+              status:
+                type: string
+                enum: [sent, acked, failed]
+              error_message:
+                type: string
+                description: Для status = failed
+      responses:
+        200:
+          description: Статус обновлён
+        404: { $ref: '#/responses/NotFound' }
+
+parameters:
+  DeviceId:
+    name: device_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+  HomeId:
+    name: home_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+  CommandId:
+    name: command_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+  ScenarioId:
+    name: scenario_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+
+responses:
+  Unauthorized:
+    description: >-
+      Нет действующего access-токена (пользовательские пути) либо
+      неверный сервисный токен (событийные пути)
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  Forbidden:
+    description: У пользователя нет роли в этом доме
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  NotFound:
+    description: Ресурс не найден или не принадлежит дому пользователя
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  BadRequest:
+    description: Некорректный запрос
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+
+definitions:
+  DeviceType:
+    type: string
+    enum: [thermostat, motion_sensor, relay, socket]
+    description: >-
+      Список синхронизирован с device_type в kit_devices и devices.
+      Расширяется по мере подключения новых типов.
+
+  Device:
+    required: [id, home_id, name, device_type, protocol, registered_at]
+    properties:
+      id:
+        type: string
+        format: uuid
+      home_id:
+        type: string
+        format: uuid
+      name:
+        type: string
+        maxLength: 200
+      device_type:
+        $ref: '#/definitions/DeviceType'
+      protocol:
+        type: string
+        enum: [mqtt, zigbee]
+      partner_id:
+        type: string
+        description: Идентификатор устройства в экосистеме партнёра
+      registered_at:
+        type: string
+        format: date-time
+
+  DeviceRegistrationInput:
+    required: [name, device_type, protocol, partner_id]
+    properties:
+      name:
+        type: string
+        maxLength: 200
+      device_type:
+        $ref: '#/definitions/DeviceType'
+      protocol:
+        type: string
+        enum: [mqtt, zigbee]
+      partner_id:
+        type: string
+        description: Идентификатор устройства у партнёра (получен через шлюз)
+
+  DeviceState:
+    required: [device_id, state, updated_at]
+    properties:
+      device_id:
+        type: string
+        format: uuid
+      state:
+        type: object
+        description: >-
+          Словарь «показатель → значение», состав зависит от типа
+          устройства. Пример для термостата:
+          {"temperature": 22.5, "power": "on"}
+      updated_at:
+        type: string
+        format: date-time
+
+  Reading:
+    required: [id, device_id, value, recorded_at]
+    properties:
+      id:
+        type: integer
+        format: int64
+      device_id:
+        type: string
+        format: uuid
+      value:
+        type: object
+        description: Snapshot показания на момент записи
+      recorded_at:
+        type: string
+        format: date-time
+
+  CommandInput:
+    required: [action]
+    properties:
+      action:
+        type: string
+      value:
+        type: object
+        description: Значение действия, если применимо
+
+  Command:
+    required: [id, device_id, payload, source, status, created_at]
+    properties:
+      id:
+        type: string
+        format: uuid
+      device_id:
+        type: string
+        format: uuid
+      payload:
+        type: object
+      source:
+        type: string
+        enum: [user, scenario]
+        description: >-
+          user — команда от интерфейса; scenario — от исполнителя сценариев
+      status:
+        type: string
+        enum: [queued, sent, acked, failed]
+        description: >-
+          queued устанавливает №3 при создании; sent/acked/failed
+          сообщает шлюз через POST /commands/{command_id}/status
+      created_at:
+        type: string
+        format: date-time
+
+  ScenarioTrigger:
+    required: [type]
+    properties:
+      type:
+        type: string
+        enum: [schedule, condition]
+      schedule:
+        type: object
+        description: Только для type = schedule
+        properties:
+          cron:
+            type: string
+            example: '0 7 * * 1-5'
+      condition:
+        type: object
+        description: Только для type = condition
+        required: [device_id, metric, operator, threshold]
+        properties:
+          device_id:
+            type: string
+            format: uuid
+          metric:
+            type: string
+            example: temperature
+          operator:
+            type: string
+            enum: ['>', '<', '==']
+          threshold:
+            type: number
+
+  ScenarioAction:
+    required: [kind]
+    properties:
+      kind:
+        type: string
+        enum: [command, notify]
+      device_id:
+        type: string
+        format: uuid
+        description: Для kind = command
+      action:
+        type: string
+      value:
+        type: object
+      message:
+        type: string
+        description: Для kind = notify
+
+  Scenario:
+    required: [id, device_id, name, trigger, actions, created_at]
+    properties:
+      id:
+        type: string
+        format: uuid
+      device_id:
+        type: string
+        format: uuid
+        description: >-
+          Устройство-адресат сценария: триггер привязан к нему, действия
+          ссылаются на устройства того же комплекта
+      name:
+        type: string
+        maxLength: 200
+      is_default:
+        type: boolean
+        description: >-
+          True, если сценарий создан из default_scenario комплекта.
+          Такие сценарии пользователь может отключить, но помечать их
+          полезно для интерфейса.
+      trigger:
+        $ref: '#/definitions/ScenarioTrigger'
+      actions:
+        type: array
+        items:
+          $ref: '#/definitions/ScenarioAction'
+      created_at:
+        type: string
+        format: date-time
+
+  ScenarioInput:
+    required: [device_id, name, trigger, actions]
+    properties:
+      device_id:
+        type: string
+        format: uuid
+      name:
+        type: string
+        maxLength: 200
+      trigger:
+        $ref: '#/definitions/ScenarioTrigger'
+      actions:
+        type: array
+        items:
+          $ref: '#/definitions/ScenarioAction'
+
+  GatewayEvent:
+    required: [event_id, device_partner_id, event_type, occurred_at]
+    properties:
+      event_id:
+        type: string
+        format: uuid
+        description: Генерирует шлюз; №3 дедуплицирует по нему повторные доставки
+      device_partner_id:
+        type: string
+        description: >-
+          partner_id устройства. №3 находит запись в devices по
+          (partner_id, protocol) и обновляет device_states / readings
+      event_type:
+        type: string
+        enum: [telemetry, state_change, heartbeat, error]
+      payload:
+        type: object
+        description: >-
+          Для telemetry — показания ({"temperature": 22.5});
+          для error — код и текст ошибки устройства
+      occurred_at:
+        type: string
+        format: date-time
+        description: Время события по часам устройства
+
+  ErrorResponse:
+    required: [code, message]
+    properties:
+      code:
+        type: string
+        example: device_offline
+      message:
+        type: string
+      details:
+        type: object
+
+securityDefinitions:
+  bearerAuth:
+    type: apiKey
+    in: header
+    name: Authorization
+    description: >-
+      JWT-токен в заголовке Authorization: Bearer <token>. Формально
+      Swagger 2.0 не имеет схемы http/bearer, поэтому она описана как
+      apiKey — инструменты это корректно отображают, а сервер валидирует
+      JWT как обычно. Действует для всех путей по умолчанию.
+  serviceAuth:
+    type: apiKey
+    in: header
+    name: X-Service-Token
+    description: >-
+      Сервисный токен для межсервисных вызовов №4 → №3. Выдаётся при
+      деплое шлюза, не связан с пользователями. Переопределяет
+      bearerAuth только на путях тега events.

@@ -1,0 +1,372 @@
+
+swagger: "2.0"
+info:
+  title: Device Gateway API
+  description: >-
+    API шлюза подключения устройств (№4): единственный сервис, который
+    общается с партнёрскими экосистемами и физическими устройствами
+    (MQTT, Zigbee и другие протоколы). Нормализует протоколы партнёров
+    во внутренние форматы.
+
+    Направления работы:
+      1. Приём команд от Control API (№3) и доставка их устройствам.
+         Результат доставки №4 сообщает в Control через его эндпоинт
+         POST /commands/{command_id}/status.
+      2. Отправка событий телеметрии в Control через его эндпоинт
+         POST /events (батчами, с дедупликацией по event_id на его стороне).
+      3. Подключение устройств: сопоставление серийных номеров
+         (мастер подключения, шаг scan_qr) с идентификаторами партнёров,
+         управление адаптерами партнёрских экосистем.
+
+    Сервис полностью внутренний: пользовательских эндпоинтов нет,
+    вся аутентификация — сервисный токен.
+  version: 1.0.0
+
+host: gateway.example.com
+basePath: /api/v1
+schemes:
+  - https
+
+consumes:
+  - application/json
+produces:
+  - application/json
+
+security:
+  - serviceAuth: []
+
+tags:
+  - name: commands
+    description: Приём команд от Control API (№3) и доставка устройствам
+  - name: adapters
+    description: Управление подключениями к партнёрским экосистемам
+  - name: discovery
+    description: Поиск и сопоставление устройств при подключении
+  - name: health
+    description: Служебные проверки живости
+
+paths:
+  # ------------------------------------------------------------------
+  # Команды
+  # ------------------------------------------------------------------
+  /commands:
+    post:
+      tags: [commands]
+      summary: Принять команду на доставку устройству
+      operationId: receiveCommand
+      description: >-
+        №3 создаёт запись команды со статусом queued и сразу передаёт её
+        сюда. Шлюз ставит команду в свою очередь доставки, переводит
+        action и payload в протокол устройства через адаптер и отвечает
+        202 не дожидаясь фактической доставки. Статусы sent/acked/failed
+        №4 сообщает в Control через его эндпоинт статуса — обратный
+        канал здесь не дублируется.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/GatewayCommandInput'
+      responses:
+        202:
+          description: Команда принята в очередь доставки
+          schema:
+            type: object
+            required: [command_id, queued_at]
+            properties:
+              command_id:
+                type: string
+                format: uuid
+              queued_at:
+                type: string
+                format: date-time
+        404:
+          description: Устройство с таким partner_id не подключено к шлюзу
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        409:
+          description: Адаптер протокола не подключён либо партнёр недоступен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  # ------------------------------------------------------------------
+  # Адаптеры партнёрских экосистем
+  # ------------------------------------------------------------------
+  /adapters:
+    get:
+      tags: [adapters]
+      summary: Список подключённых адаптеров
+      operationId: listAdapters
+      responses:
+        200:
+          description: Адаптеры и их статусы
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/Adapter'
+
+    post:
+      tags: [adapters]
+      summary: Подключить адаптер партнёрской экосистемы
+      operationId: registerAdapter
+      description: >-
+        Регистрирует интеграцию с партнёром: протокол и учётные данные.
+        Шлюз устанавливает соединение и после успеха начинает получать
+        события устройств через этот адаптер. Требуется роль owner или
+        admin в доме — №4 проверяет её тем же вызовом к IAM API, что и №3.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/AdapterInput'
+      responses:
+        201:
+          description: Адаптер подключён
+          schema:
+            $ref: '#/definitions/Adapter'
+        400: { $ref: '#/responses/BadRequest' }
+        409:
+          description: Адаптер для этой пары (home_id, protocol, partner) уже существует
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /adapters/{adapter_id}:
+    delete:
+      tags: [adapters]
+      summary: Отключить адаптер
+      operationId: deleteAdapter
+      description: >-
+        Разрывает соединение с партнёрской экосистемой. Устройства,
+        зарегистрированные через этот адаптер, остаются в Control DB —
+        их отключение выполняет №3 через DELETE /devices/{device_id}.
+      parameters:
+        - $ref: '#/parameters/AdapterId'
+      responses:
+        204:
+          description: Адаптер отключён
+        404: { $ref: '#/responses/NotFound' }
+
+  /adapters/{adapter_id}/sync:
+    post:
+      tags: [adapters]
+      summary: Принудительная синхронизация состояний
+      operationId: syncAdapter
+      description: >-
+        Запрашивает у партнёра актуальные состояния всех устройств
+        адаптера и отправляет их в Control через POST /events. Полезно
+        после перезапуска шлюза или длительного офлайна — интерфейс
+        не должен показывать устаревшие данные.
+      parameters:
+        - $ref: '#/parameters/AdapterId'
+      responses:
+        202:
+          description: Синхронизация запущена
+        404: { $ref: '#/responses/NotFound' }
+        409:
+          description: Адаптер в состоянии ошибки, синхронизация невозможна
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  # ------------------------------------------------------------------
+  # Поиск и сопоставление устройств
+  # ------------------------------------------------------------------
+  /adapters/{adapter_id}/devices/resolve:
+    post:
+      tags: [discovery]
+      summary: Сопоставить серийные номера с устройствами партнёра
+      operationId: resolveDevices
+      description: >-
+        Ключевой эндпоинт для подключения комплекта. Мастер подключения
+        в интерфейсе (№2) собирает серийные номера на шаге scan_qr;
+        №5 (Kits API) в ходе регистрации комплекта передаёт их сюда,
+        шлюз спрашивает у партнёрской экосистемы, какие из номеров
+        найдены и доступны, и возвращает их partner_id. Дальше №5
+        регистрирует каждое устройство в №3 с полученным partner_id.
+      parameters:
+        - $ref: '#/parameters/AdapterId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/ResolveInput'
+      responses:
+        200:
+          description: Результат сопоставления
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/ResolvedDevice'
+        404: { $ref: '#/responses/NotFound' }
+        409:
+          description: Адаптер недоступен
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  # ------------------------------------------------------------------
+  # Служебное
+  # ------------------------------------------------------------------
+  /health:
+    get:
+      tags: [health]
+      summary: Проверка живости шлюза
+      operationId: getHealth
+      description: Используется оркестратором и балансировщиком; без изменений контракта.
+      responses:
+        200:
+          description: Шлюз работает
+          schema:
+            type: object
+            required: [status, adapters_connected]
+            properties:
+              status:
+                type: string
+                enum: [ok, degraded]
+              adapters_connected:
+                type: integer
+
+parameters:
+  AdapterId:
+    name: adapter_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+
+responses:
+  Unauthorized:
+    description: Неверный или отсутствующий сервисный токен
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  BadRequest:
+    description: Некорректный запрос
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  NotFound:
+    description: Ресурс не найден
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+
+definitions:
+  Protocol:
+    type: string
+    enum: [mqtt, zigbee]
+    description: Список синхронизирован с protocol в devices и kit_devices
+
+  GatewayCommandInput:
+    required: [command_id, device_partner_id, protocol, action, payload]
+    properties:
+      command_id:
+        type: string
+        format: uuid
+        description: Идентификатор из Control DB — по нему шлюз отчитывается статусом
+      device_partner_id:
+        type: string
+        description: Идентификатор устройства в экосистеме партнёра
+      protocol:
+        $ref: '#/definitions/Protocol'
+      action:
+        type: string
+      payload:
+        type: object
+
+  AdapterInput:
+    required: [home_id, protocol, partner, credentials]
+    properties:
+      home_id:
+        type: string
+        format: uuid
+        description: Дом, к которому привязано подключение
+      protocol:
+        $ref: '#/definitions/Protocol'
+      partner:
+        type: string
+        description: Идентификатор партнёрской экосистемы
+      credentials:
+        type: object
+        description: >-
+          Учётные данные интеграции (токен партнёра, ключ хаба).
+          Шлюз хранит их шифрованными; наружу не возвращаются никогда —
+          даже в GET /adapters отдаётся только флаг credentials_set.
+
+  Adapter:
+    required: [adapter_id, home_id, protocol, partner, status, created_at]
+    properties:
+      adapter_id:
+        type: string
+        format: uuid
+      home_id:
+        type: string
+        format: uuid
+      protocol:
+        $ref: '#/definitions/Protocol'
+      partner:
+        type: string
+      status:
+        type: string
+        enum: [connected, disconnected, error]
+        description: >-
+          connected — соединение с партнёром установлено;
+          error — последняя попытка соединения провалилась,
+          текст причины шлюз логирует, наружу не отдаёт
+      credentials_set:
+        type: boolean
+      created_at:
+        type: string
+        format: date-time
+
+  ResolveInput:
+    required: [serials]
+    properties:
+      serials:
+        type: array
+        maxItems: 50
+        description: Серийные номера из QR-кодов, собранные мастером подключения
+        items:
+          type: string
+
+  ResolvedDevice:
+    required: [serial, found]
+    properties:
+      serial:
+        type: string
+      found:
+        type: boolean
+        description: >-
+          False для номеров, которых партнёр не знает или устройство
+          сейчас не в сети — №5 по этому признаку отчитается об ошибке
+          регистрации конкретного устройства
+      partner_id:
+        type: string
+        description: Заполнен при found = true
+      device_type:
+        type: string
+        description: Тип по данным партнёра; №5 сверяет его с devices_to_register
+
+  ErrorResponse:
+    required: [code, message]
+    properties:
+      code:
+        type: string
+        example: adapter_unavailable
+      message:
+        type: string
+      details:
+        type: object
+
+securityDefinitions:
+  serviceAuth:
+    type: apiKey
+    in: header
+    name: X-Service-Token
+    description: >-
+      Сервисный токен. Вызыватели — №3 (команды) и №5 (сопоставление
+      при регистрации комплекта). Пользовательского доступа нет.
