@@ -1,0 +1,302 @@
+swagger: "2.0"
+info:
+  title: Kits API
+  description: >-
+    API сервиса комплектов устройств (№5): каталог комплектов, инструкции,
+    и главное — оркестрация подключения комплекта за один вызов.
+
+    Логика подключения:
+      1. Пользователь сканирует QR-коды устройств в мастере подключения.
+      2. Kits API запрашивает у шлюза (№4) сопоставление серийников с partner_id.
+      3. Для каждого найденного устройства Kits регистрирует его в Control (№3).
+      4. Ошибки по отдельным устройствам не ломают весь комплект:
+         возвращается детализация по каждому серийнику.
+
+    Аутентификация:
+      - Пользовательские операции — JWT (bearerAuth).
+      - Внутренние вызовы к шлюзу и Control — сервисный токен (serviceAuth).
+  version: 1.0.0
+
+host: api.example.com
+basePath: /api/v1
+schemes:
+  - https
+
+consumes:
+  - application/json
+produces:
+  - application/json
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: kits
+    description: Каталог комплектов и инструкции
+  - name: provisioning
+    description: Подключение комплекта устройств (мастер)
+
+paths:
+  # ------------------------------------------------------------------
+  # Каталог и инструкции
+  # ------------------------------------------------------------------
+  /kits:
+    get:
+      tags: [kits]
+      summary: Список комплектов
+      operationId: listKits
+      responses:
+        200:
+          description: Список комплектов
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/Kit'
+        401: { $ref: '#/responses/Unauthorized' }
+
+  /kits/{kit_id}:
+    get:
+      tags: [kits]
+      summary: Детали комплекта
+      operationId: getKit
+      parameters:
+        - $ref: '#/parameters/KitId'
+      responses:
+        200:
+          description: Комплект
+          schema:
+            $ref: '#/definitions/Kit'
+        404: { $ref: '#/responses/NotFound' }
+
+  /kits/{kit_id}/instructions:
+    get:
+      tags: [kits]
+      summary: Инструкция по подключению комплекта
+      operationId: getInstructions
+      parameters:
+        - $ref: '#/parameters/KitId'
+      responses:
+        200:
+          description: Инструкция
+          schema:
+            $ref: '#/definitions/Instruction'
+        404: { $ref: '#/responses/NotFound' }
+
+  # ------------------------------------------------------------------
+  # Подключение комплекта (мастер)
+  # ------------------------------------------------------------------
+  /homes/{home_id}/provision:
+    post:
+      tags: [provisioning]
+      summary: Подключить комплект устройств
+      operationId: provisionKit
+      description: >-
+        Оркестратор подключения: принимает список серийных номеров
+        (из отсканированных QR) и превращает их в зарегистрированные
+        устройства в Control. Делает это в одной транзакциильной логике:
+        1) resolve у шлюза, 2) регистрация в Control для найденных,
+        3) возврат детального отчёта по каждому устройству.
+
+        Если часть устройств не найдена партнёром — операция не откатывается
+        целиком: возвращается отчёт, какие устройства зарегистрированы,
+        а какие нет. Это позволяет интерфейсу показать понятную ошибку
+        именно по конкретному устройству.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/ProvisionInput'
+      responses:
+        202:
+          description: Провижининг запущен, результат доступен по provision_id
+          schema:
+            type: object
+            required: [provision_id]
+            properties:
+              provision_id:
+                type: string
+                format: uuid
+        400: { $ref: '#/responses/BadRequest' }
+        403: { $ref: '#/responses/Forbidden' }
+        404:
+          description: Дом не найден или комплект не существует
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /provisions/{provision_id}:
+    get:
+      tags: [provisioning]
+      summary: Статус и результат провижининга комплекта
+      operationId: getProvision
+      parameters:
+        - $ref: '#/parameters/ProvisionId'
+      responses:
+        200:
+          description: Результат операции
+          schema:
+            $ref: '#/definitions/ProvisionResult'
+        404: { $ref: '#/responses/NotFound' }
+
+parameters:
+  KitId:
+    name: kit_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+  HomeId:
+    name: home_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+  ProvisionId:
+    name: provision_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+
+responses:
+  Unauthorized:
+    description: Нет действующего access-токена
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  Forbidden:
+    description: Недостаточно прав (нужна роль owner/admin в доме)
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  NotFound:
+    description: Ресурс не найден
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  BadRequest:
+    description: Некорректный запрос
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+
+definitions:
+  Kit:
+    required: [kit_id, name, device_types]
+    properties:
+      kit_id:
+        type: string
+        format: uuid
+      name:
+        type: string
+      description:
+        type: string
+      device_types:
+        type: array
+        description: Ожидаемые типы устройств в комплекте
+        items:
+          type: string
+          enum: [thermostat, motion_sensor, relay, socket]
+
+  Instruction:
+    required: [steps]
+    properties:
+      steps:
+        type: array
+        items:
+          type: object
+          required: [title, description]
+          properties:
+            title:
+              type: string
+            description:
+              type: string
+            image_url:
+              type: string
+              format: url
+
+  ProvisionInput:
+    required: [kit_id, serials]
+    properties:
+      kit_id:
+        type: string
+        format: uuid
+        description: ID комплекта из каталога
+      serials:
+        type: array
+        maxItems: 50
+        description: Серийные номера, собранные мастером подключения (QR)
+        items:
+          type: string
+
+  DeviceRegistrationStatus:
+    required: [serial, status]
+    properties:
+      serial:
+        type: string
+      status:
+        type: string
+        enum: [registered, not_found, already_registered, error]
+      device_id:
+        type: string
+        format: uuid
+        description: Заполнен при status = registered
+      error_code:
+        type: string
+        description: Код ошибки, если статус не registered
+      error_message:
+        type: string
+
+  ProvisionResult:
+    required: [provision_id, status, items]
+    properties:
+      provision_id:
+        type: string
+        format: uuid
+      status:
+        type: string
+        enum: [pending, completed, partially_failed, failed]
+      started_at:
+        type: string
+        format: date-time
+      completed_at:
+        type: string
+        format: date-time
+      items:
+        type: array
+        items:
+          $ref: '#/definitions/DeviceRegistrationStatus'
+      summary:
+        type: object
+        properties:
+          total:
+            type: integer
+          registered:
+            type: integer
+          not_found:
+            type: integer
+          already_registered:
+            type: integer
+
+  ErrorResponse:
+    required: [code, message]
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+      details:
+        type: object
+
+securityDefinitions:
+  bearerAuth:
+    type: apiKey
+    in: header
+    name: Authorization
+    description: JWT-токен пользователя (интерфейс №2)
+  serviceAuth:
+    type: apiKey
+    in: header
+    name: X-Service-Token
+    description: Сервисный токен для внутренних вызовов к шлюзу (№4) и Control (№3)

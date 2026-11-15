@@ -1,0 +1,35 @@
+@startuml
+title ER-диаграмма - Kits DB (Комплекты устройств)
+
+hide circle
+
+entity kits {
+  *id : uuid <<PK>>
+  --
+  name : varchar(200)
+  description : text
+  price : numeric(10,2)
+  created_at : timestamptz
+}
+
+entity kit_devices {
+  *id : uuid <<PK>>
+  --
+  *kit_id : uuid <<FK>>
+  device_type : varchar(50)
+  protocol : varchar(20)
+  quantity : int
+}
+
+entity setup_instructions {
+  *id : uuid <<PK>>
+  --
+  *kit_id : uuid <<FK>>
+  tutorial : jsonb
+  devices_to_register : jsonb
+  default_scenario : jsonb
+}
+
+kits ||..o{ kit_devices : "включает устройства"
+kits ||..o| setup_instructions : "имеет инструкцию"
+@enduml

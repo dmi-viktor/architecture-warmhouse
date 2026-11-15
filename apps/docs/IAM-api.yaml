@@ -1,0 +1,611 @@
+swagger: "2.0"
+info:
+  title: IAM API
+  description: >-
+    API сервиса аутентификации и управления доступом (№1): регистрация
+    и вход пользователей, refresh-сессии, дома и членство в домах с ролями.
+
+    Три канала доступа:
+      1. Пользовательские операции (интерфейс №2) — JWT из этого же сервиса.
+      2. Сервисные операции (Control API №3, Kits API №5) — сервисный токен:
+         проверка роли пользователя в доме.
+      3. Обновление access-токена — refresh-токеном без полного логина.
+
+    Владение домом определяется записью в home_members с role = owner;
+    отдельного поля owner_id в homes нет.
+  version: 1.0.0
+
+host: api.example.com
+basePath: /api/v1
+schemes:
+  - https
+
+consumes:
+  - application/json
+produces:
+  - application/json
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: auth
+    description: Регистрация, вход, обновление и отзыв сессий
+  - name: homes
+    description: Дома пользователя и участники
+  - name: internal
+    description: >-
+      Проверки для межсервисных вызовов (№3, №5). Аутентификация
+      сервисным токеном, не JWT пользователя.
+
+paths:
+  # ------------------------------------------------------------------
+  # Аутентификация
+  # ------------------------------------------------------------------
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Зарегистрировать пользователя
+      operationId: registerUser
+      security: []
+      description: >-
+        Создаёт запись в users со статусом active и сразу выдаёт пару
+        токенов — отдельный шаг подтверждения email на старте не делаем,
+        поле email_verified добавим позже при необходимости.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/RegisterInput'
+      responses:
+        201:
+          description: Пользователь создан, сессия открыта
+          schema:
+            $ref: '#/definitions/AuthSession'
+        400: { $ref: '#/responses/BadRequest' }
+        409:
+          description: Пользователь с таким email уже существует
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Войти
+      operationId: login
+      security: []
+      description: >-
+        Проверяет пароль по password_hash, создаёт запись в sessions
+        и возвращает access-токен (JWT) вместе с refresh-токеном.
+        При блокировке пользователя (status = blocked) возвращает 403 —
+        интерфейс показывает сообщение, не раскрывая деталей.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/LoginInput'
+      responses:
+        200:
+          description: Успешный вход
+          schema:
+            $ref: '#/definitions/AuthSession'
+        400: { $ref: '#/responses/BadRequest' }
+        401:
+          description: Неверный email или пароль
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        403:
+          description: Пользователь заблокирован
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      summary: Обновить access-токен
+      operationId: refreshSession
+      security: []
+      description: >-
+        Принимает refresh-токен, проверяет его хэш в sessions
+        (сессия не отозвана и не истекла) и выдаёт новую пару токенов.
+        Сессия ротируется: старая запись помечается revoked_at, создаётся
+        новая — так повторное использование отозванного refresh-токена
+        обнаруживается и делает недоверенными все связанные сессии.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/RefreshInput'
+      responses:
+        200:
+          description: Новая пара токенов
+          schema:
+            $ref: '#/definitions/AuthSession'
+        401:
+          description: Refresh-токен недействителен или сессия отозвана
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: Выйти
+      operationId: logout
+      description: >-
+        Отзывает текущую сессию: в sessions проставляется revoked_at.
+        Access-токен продолжает действовать до истечения — это ожидаемо,
+        его время жизни короткое.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/RefreshInput'
+      responses:
+        204:
+          description: Сессия отозвана
+        401: { $ref: '#/responses/Unauthorized' }
+
+  /me:
+    get:
+      tags: [auth]
+      summary: Профиль текущего пользователя
+      operationId: getMe
+      responses:
+        200:
+          description: Данные пользователя
+          schema:
+            $ref: '#/definitions/User'
+        401: { $ref: '#/responses/Unauthorized' }
+
+  # ------------------------------------------------------------------
+  # Дома и участники
+  # ------------------------------------------------------------------
+  /me/homes:
+    get:
+      tags: [homes]
+      summary: Список домов пользователя
+      operationId: listMyHomes
+      description: >-
+        Дома, где у пользователя есть запись в home_members. Интерфейс
+        вызывает после выбора дома, чтобы положить home_id и роль в JWT.
+      responses:
+        200:
+          description: Список домов с ролями
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/HomeWithRole'
+        401: { $ref: '#/responses/Unauthorized' }
+
+  /homes:
+    post:
+      tags: [homes]
+      summary: Создать дом
+      operationId: createHome
+      description: >-
+        Создаёт дом и запись в home_members с role = owner для
+        создавшего пользователя — в одной операции.
+      parameters:
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/HomeInput'
+      responses:
+        201:
+          description: Дом создан
+          schema:
+            $ref: '#/definitions/HomeWithRole'
+        400: { $ref: '#/responses/BadRequest' }
+        401: { $ref: '#/responses/Unauthorized' }
+
+  /homes/{home_id}:
+    get:
+      tags: [homes]
+      summary: Дом по идентификатору
+      operationId: getHome
+      parameters:
+        - $ref: '#/parameters/HomeId'
+      responses:
+        200:
+          description: Дом
+          schema:
+            $ref: '#/definitions/HomeWithRole'
+        403: { $ref: '#/responses/Forbidden' }
+        404: { $ref: '#/responses/NotFound' }
+
+    delete:
+      tags: [homes]
+      summary: Удалить дом
+      operationId: deleteHome
+      description: >-
+        Только role = owner. Удаляет дом и все записи участников.
+        Устройства и сценарии остаётся чистить сервису №3 — через
+        событие или фоновую сверку, физически его БД недоступна отсюда.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+      responses:
+        204:
+          description: Дом удалён
+        403: { $ref: '#/responses/Forbidden' }
+        404: { $ref: '#/responses/NotFound' }
+
+  /homes/{home_id}/members:
+    get:
+      tags: [homes]
+      summary: Список участников дома
+      operationId: listMembers
+      parameters:
+        - $ref: '#/parameters/HomeId'
+      responses:
+        200:
+          description: Участники и их роли
+          schema:
+            type: object
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: '#/definitions/Member'
+        403: { $ref: '#/responses/Forbidden' }
+
+    post:
+      tags: [homes]
+      summary: Пригласить участника
+      operationId: inviteMember
+      description: >-
+        Требуется роль owner или admin. Находит пользователя по email
+        и создаёт запись в home_members; invited_by заполняется
+        идентификатором вызывающего. Если пользователя с таким email
+        нет — 404: интерфейс предложит поделиться приглашением позже,
+        когда получатель зарегистрируется.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/MemberInput'
+      responses:
+        201:
+          description: Участник добавлен
+          schema:
+            $ref: '#/definitions/Member'
+        400: { $ref: '#/responses/BadRequest' }
+        403: { $ref: '#/responses/Forbidden' }
+        404:
+          description: Пользователь с таким email не найден
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        409:
+          description: Пользователь уже является участником дома
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+  /homes/{home_id}/members/{user_id}:
+    put:
+      tags: [homes]
+      summary: Изменить роль участника
+      operationId: updateMemberRole
+      description: >-
+        Только role = owner. Нельзя изменить роль последнего владельца
+        и нельзя выдать роль owner — передача владения выполняется
+        отдельной операцией transferOwnership.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - $ref: '#/parameters/UserId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: '#/definitions/MemberRoleInput'
+      responses:
+        200:
+          description: Роль изменена
+          schema:
+            $ref: '#/definitions/Member'
+        400: { $ref: '#/responses/BadRequest' }
+        403: { $ref: '#/responses/Forbidden' }
+        404: { $ref: '#/responses/NotFound' }
+
+    delete:
+      tags: [homes]
+      summary: Удалить участника
+      operationId: removeMember
+      description: >-
+        Требуется роль owner или admin (админ не может удалить владельца).
+        Последнего владельца удалить нельзя.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - $ref: '#/parameters/UserId'
+      responses:
+        204:
+          description: Участник удалён
+        400:
+          description: Нельзя удалить последнего владельца
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        403: { $ref: '#/responses/Forbidden' }
+        404: { $ref: '#/responses/NotFound' }
+
+  /homes/{home_id}/ownership:
+    post:
+      tags: [homes]
+      summary: Передать владение домом
+      operationId: transferOwnership
+      description: >-
+        Только текущий owner. Назначает нового владельца; текущий
+        становится admin. Атомарно в одной транзакции, чтобы в доме
+        всегда оставался хотя бы один владелец.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - name: body
+          in: body
+          required: true
+          schema:
+            type: object
+            required: [new_owner_id]
+            properties:
+              new_owner_id:
+                type: string
+                format: uuid
+      responses:
+        200:
+          description: Владение передано
+          schema:
+            type: object
+            required: [home_id, owner_id]
+            properties:
+              home_id: { type: string, format: uuid }
+              owner_id: { type: string, format: uuid }
+        400:
+          description: Новый владелец не является участником дома
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+        403: { $ref: '#/responses/Forbidden' }
+        404: { $ref: '#/responses/NotFound' }
+
+  # ------------------------------------------------------------------
+  # Межсервисные проверки — сервисная аутентификация
+  # ------------------------------------------------------------------
+  /internal/homes/{home_id}/members/{user_id}:
+    get:
+      tags: [internal]
+      summary: Проверить роль пользователя в доме
+      operationId: checkRole
+      security:
+        - serviceAuth: []
+      description: >-
+        Основной вызов со стороны №3: перед выдачей доступа к устройству
+        дома он спрашивает здесь роль пользователя. Ответ содержит роль
+        или 404 — не различая «нет роли» и «нет такого дома», чтобы
+        не раскрывать наружу лишнее. Control кэширует результат на
+        короткое время (30–60 секунд), чтобы не ходить сюда на каждый
+        запрос устройств.
+      parameters:
+        - $ref: '#/parameters/HomeId'
+        - $ref: '#/parameters/UserId'
+      responses:
+        200:
+          description: Роль пользователя в доме
+          schema:
+            $ref: '#/definitions/RoleInfo'
+        404:
+          description: Нет роли в доме (или дом не существует)
+          schema:
+            $ref: '#/definitions/ErrorResponse'
+
+parameters:
+  HomeId:
+    name: home_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+  UserId:
+    name: user_id
+    in: path
+    required: true
+    type: string
+    format: uuid
+
+responses:
+  Unauthorized:
+    description: Нет действующего access-токена либо неверный сервисный токен
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  Forbidden:
+    description: Недостаточно прав для операции
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  NotFound:
+    description: Ресурс не найден или недоступен
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+  BadRequest:
+    description: Некорректный запрос
+    schema:
+      $ref: '#/definitions/ErrorResponse'
+
+definitions:
+  Role:
+    type: string
+    enum: [owner, admin, member]
+    description: >-
+      owner — полный доступ, единственный, кто может удалять дом и
+      менять роли; admin — управление участниками и устройствами;
+      member — просмотр и управление устройствами без работы с участниками.
+
+  RegisterInput:
+    required: [email, password]
+    properties:
+      email:
+        type: string
+        format: email
+      phone:
+        type: string
+        description: Опционально; формат +E.164
+      password:
+        type: string
+        minLength: 8
+        description: >-
+          Пароль в открытом виде только в момент вызова; сервер хранит
+          только bcrypt/argon2-хэш.
+
+  LoginInput:
+    required: [email, password]
+    properties:
+      email:
+        type: string
+        format: email
+      password:
+        type: string
+
+  RefreshInput:
+    required: [refresh_token]
+    properties:
+      refresh_token:
+        type: string
+
+  AuthSession:
+    required: [access_token, refresh_token, expires_at, user]
+    properties:
+      access_token:
+        type: string
+        description: JWT; внутри user_id и expires_at
+      refresh_token:
+        type: string
+        description: >-
+          Хранится у клиента; на сервере — только хэш в sessions
+      expires_at:
+        type: string
+        format: date-time
+        description: Момент истечения access-токена
+      user:
+        $ref: '#/definitions/User'
+
+  User:
+    required: [id, email, status, created_at]
+    properties:
+      id:
+        type: string
+        format: uuid
+      email:
+        type: string
+        format: email
+      phone:
+        type: string
+      status:
+        type: string
+        enum: [active, blocked]
+      created_at:
+        type: string
+        format: date-time
+
+  HomeInput:
+    required: [name]
+    properties:
+      name:
+        type: string
+        maxLength: 200
+
+  HomeWithRole:
+    required: [id, name, role, created_at]
+    properties:
+      id:
+        type: string
+        format: uuid
+      name:
+        type: string
+        maxLength: 200
+      role:
+        $ref: '#/definitions/Role'
+      created_at:
+        type: string
+        format: date-time
+
+  MemberInput:
+    required: [email, role]
+    properties:
+      email:
+        type: string
+        format: email
+      role:
+        type: string
+        enum: [admin, member]
+        description: Пригласить владельцем нельзя — только через transferOwnership
+
+  MemberRoleInput:
+    required: [role]
+    properties:
+      role:
+        type: string
+        enum: [admin, member]
+
+  Member:
+    required: [user_id, email, role, created_at]
+    properties:
+      user_id:
+        type: string
+        format: uuid
+      email:
+        type: string
+        format: email
+      role:
+        $ref: '#/definitions/Role'
+      invited_by:
+        type: string
+        format: uuid
+        description: Кто пригласил; null у создателя дома
+      created_at:
+        type: string
+        format: date-time
+
+  RoleInfo:
+    required: [home_id, user_id, role]
+    properties:
+      home_id:
+        type: string
+        format: uuid
+      user_id:
+        type: string
+        format: uuid
+      role:
+        $ref: '#/definitions/Role'
+
+  ErrorResponse:
+    required: [code, message]
+    properties:
+      code:
+        type: string
+        example: email_taken
+      message:
+        type: string
+      details:
+        type: object
+
+securityDefinitions:
+  bearerAuth:
+    type: apiKey
+    in: header
+    name: Authorization
+    description: >-
+      JWT-токен в заголовке Authorization: Bearer <token>. Формально
+      Swagger 2.0 не имеет схемы http/bearer, поэтому она описана как
+      apiKey. Действует для всех путей по умолчанию.
+  serviceAuth:
+    type: apiKey
+    in: header
+    name: X-Service-Token
+    description: >-
+      Сервисный токен для межсервисных вызовов (№3, №5). Переопределяет
+      bearerAuth только на путях тега internal.
